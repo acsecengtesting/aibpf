@@ -1,0 +1,9 @@
+vmlinux.h
+*.bpf.o
+*.o
+aibpf
+secret-proxy
+/bin/
+.env
+.vm_ip
+.vm_id
