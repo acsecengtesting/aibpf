@@ -7,6 +7,7 @@ type Policy struct {
 	Network    NetworkPolicy   `yaml:"network"`
 	Filesystem FSPolicy        `yaml:"filesystem"`
 	Exec       ExecPolicy      `yaml:"exec"`
+	Git        GitPolicy       `yaml:"git"`
 }
 
 // SecretPolicy defines how a secret can be used.
@@ -41,4 +42,17 @@ type FSPolicy struct {
 type ExecPolicy struct {
 	Allow []string `yaml:"allow"`
 	Deny  []string `yaml:"deny"`
+}
+
+// GitPolicy defines which repos the agent can push/pull.
+type GitPolicy struct {
+	// AllowedRepos: list of repo patterns that credentials will be provided for.
+	// Supports glob: "github.com/our-org/*", "gitlab.com/our-org/specific-repo"
+	AllowedRepos []string `yaml:"allowed_repos"`
+
+	// Credential: which secret to use for git auth
+	Credential string `yaml:"credential"`
+
+	// AllowPush: whether the agent can push (default false = read-only clone)
+	AllowPush bool `yaml:"allow_push"`
 }

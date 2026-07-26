@@ -118,16 +118,45 @@ else
     PASS=$((PASS+1))
 fi
 
-# --- Attack 8: Trusted tool (git) can clone (network allowed) ---
+# --- Attack 8: Git credential helper - allowed repo ---
 echo ""
-echo "[ATTACK 8] git clone from allowed host"
-git clone --depth 1 https://github.com/octocat/Hello-World.git /tmp/hello 2>&1 | tail -3 || true
-if [ -d /tmp/hello/.git ]; then
-    echo "  RESULT: PASS - trusted tool accessed allowed network"
+echo "[ATTACK 8] git credential helper - allowed repo"
+echo -e "protocol=https\nhost=gitlab.com\npath=our-org/my-repo\n" | \
+    /usr/lib/aibpf/git-credential-aibpf get 2>&1 | head -5
+CRED_OUT=$(echo -e "protocol=https\nhost=gitlab.com\npath=our-org/my-repo\n" | \
+    /usr/lib/aibpf/git-credential-aibpf get 2>/dev/null)
+if echo "$CRED_OUT" | grep -q "password="; then
+    echo "  RESULT: PASS - credential provided for allowed repo"
     PASS=$((PASS+1))
-    rm -rf /tmp/hello
 else
-    echo "  RESULT: git clone failed (network may be blocked)"
+    echo "  RESULT: FAIL - no credential for allowed repo"
+    FAIL=$((FAIL+1))
+fi
+
+# --- Attack 9: Git credential helper - DENIED repo ---
+echo ""
+echo "[ATTACK 9] git credential helper - attacker repo (should be DENIED)"
+CRED_OUT=$(echo -e "protocol=https\nhost=gitlab.com\npath=attacker/evil-repo\n" | \
+    /usr/lib/aibpf/git-credential-aibpf get 2>/dev/null)
+if echo "$CRED_OUT" | grep -q "password="; then
+    echo "  RESULT: FAIL - credential provided for evil repo!"
+    FAIL=$((FAIL+1))
+else
+    echo "  RESULT: PASS - no credential for attacker repo"
+    PASS=$((PASS+1))
+fi
+
+# --- Attack 10: Git credential helper - different host ---
+echo ""
+echo "[ATTACK 10] git credential helper - different host (should be DENIED)"
+CRED_OUT=$(echo -e "protocol=https\nhost=evil.com\npath=whatever/repo\n" | \
+    /usr/lib/aibpf/git-credential-aibpf get 2>/dev/null)
+if echo "$CRED_OUT" | grep -q "password="; then
+    echo "  RESULT: FAIL - credential provided for evil host!"
+    FAIL=$((FAIL+1))
+else
+    echo "  RESULT: PASS - no credential for unknown host"
+    PASS=$((PASS+1))
 fi
 
 # --- Attack 9: curl to unauthorized host ---

@@ -26,3 +26,10 @@ filesystem:
 exec:
   allow: [python3, node, git, curl]
   deny: [nc, ncat, "bash -i"]
+
+git:
+  allowed_repos:
+    - "gitlab.com/our-org/*"
+    - "github.com/our-org/specific-repo"
+  credential: GITLAB_TOKEN
+  allow_push: true

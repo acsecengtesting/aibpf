@@ -19,6 +19,13 @@ echo "Docker: $(docker --version)"
 # --- Step 2: Build test image ---
 echo ""
 echo "--- Building test container image ---"
+
+# Build credential helper for the container (linux/amd64)
+echo "  Building git-credential-aibpf..."
+CGO_ENABLED=0 go build -o test/container/git-credential-aibpf ./cmd/git-credential-aibpf
+cp rootfs/etc/gitconfig test/container/gitconfig
+cp policy.example.yaml test/container/policy.yaml
+
 docker build -t aibpf-test -f test/container/Dockerfile test/container/
 echo "  Image built."
 

@@ -1,0 +1,24 @@
+# System-level git config (read-only image layer)
+# The agent cannot override credential.helper because this is system-level
+# and the credential helper itself validates repo URLs against policy.
+
+[credential]
+    helper = /usr/lib/aibpf/git-credential-aibpf
+
+[safe]
+    # Only allow git operations in /workspace
+    directory = /workspace
+
+[transfer]
+    # Disable git protocol (force HTTPS where we control auth)
+    fsckObjects = true
+
+[protocol]
+    # Only allow https (we control credential flow)
+    allow = never
+
+[protocol "https"]
+    allow = always
+
+[protocol "file"]
+    allow = always
