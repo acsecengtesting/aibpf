@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: aibpf-agent
+  labels:
+    app: aibpf-agent
+spec:
+  # Separate PID namespaces per container (default in k8s)
+  shareProcessNamespace: false
+
+  containers:
+    # Agent container — untrusted, no secrets
+    - name: agent
+      image: aibpf-agent:latest
+      imagePullPolicy: Never
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: cred-socket
+          mountPath: /var/run/aibpf
+          readOnly: true
+        - name: workspace
+          mountPath: /workspace
+      securityContext:
+        capabilities:
+          drop: ["ALL"]
+          add: ["NET_RAW"]  # for basic networking
+
+    # Credential service sidecar — trusted, has secrets
+    - name: credential-service
+      image: aibpf-credential-service:latest
+      imagePullPolicy: Never
+      volumeMounts:
+        - name: cred-socket
+          mountPath: /var/run/aibpf
+        - name: secrets
+          mountPath: /secrets
+          readOnly: true
+        - name: policy
+          mountPath: /etc/aibpf
+          readOnly: true
+      env:
+        - name: SECRETS_PATH
+          value: /secrets/env
+
+  automountServiceAccountToken: false
+
+  volumes:
+    - name: cred-socket
+      emptyDir: {}
+    - name: workspace
+      emptyDir: {}
+    - name: secrets
+      secret:
+        secretName: aibpf-secrets
+    - name: policy
+      configMap:
+        name: aibpf-policy
