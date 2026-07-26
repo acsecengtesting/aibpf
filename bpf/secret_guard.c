@@ -147,22 +147,31 @@ static __always_inline int scan_for_secret(char *buf, __u32 buf_len, __u32 *matc
 }
 
 // ============================================================
-// WRITE SCRUBBING — only for untrusted processes
+// WRITE SCRUBBING
+// - fd 0/1/2 (stdin/stdout/stderr): ALWAYS scrub, even trusted processes
+//   (prevents debug output from leaking secrets via curl -v, GIT_TRACE, etc.)
+// - fd > 2: only scrub for untrusted processes
+//   (trusted tools need to send secrets over network sockets)
 // ============================================================
 
 SEC("tracepoint/syscalls/sys_enter_write")
 int guard_write_enter(struct trace_event_raw_sys_enter *ctx) {
-    // Trusted processes can write secrets freely (e.g. git sending auth)
-    if (is_trusted_pid())
-        return 0;
-
     __u32 zero = 0;
     __u32 *cnt = bpf_map_lookup_elem(&secret_count, &zero);
     if (!cnt || *cnt == 0) return 0;
 
+    int fd = (int)ctx->args[0];
+
+    // For fd > 2 (network/file), only block untrusted processes
+    // Trusted processes can send secrets over sockets (git auth, curl, etc.)
+    if (fd > 2 && is_trusted_pid())
+        return 0;
+
+    // For fd 0/1/2 (stdio): ALWAYS block regardless of trust
+    // No legitimate reason for any process to write raw secret to terminal
+
     char *user_buf = (char *)ctx->args[1];
     __u64 user_len = ctx->args[2];
-    int fd = (int)ctx->args[0];
 
     char *buf = bpf_map_lookup_elem(&scan_buf, &zero);
     if (!buf) return 0;
