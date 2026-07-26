@@ -256,4 +256,86 @@ int guard_read_exit(struct trace_event_raw_sys_exit *ctx) {
     return 0;
 }
 
+// ============================================================
+// AUTO-WATCH: hook openat to auto-add fds for secrets paths
+// When an untrusted process opens a path containing "secrets" or ".env",
+// the resulting fd is automatically added to watched_fds.
+// We use sys_enter_openat to stash the path check, then sys_exit_openat
+// to get the returned fd and add it to the map.
+// ============================================================
+
+#define SECRETS_PATH_LEN 32
+
+// Per-tid stash: did this openat target a secrets file?
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u32);  // tid
+    __type(value, __u8); // 1 = this was a secrets path open
+} pending_opens SEC(".maps");
+
+static __always_inline int is_secrets_path(char *path) {
+    // Check for "secrets" or ".env" in path
+    #pragma unroll
+    for (int i = 0; i < SECRETS_PATH_LEN - 7; i++) {
+        if (path[i] == 0) break;
+        // "secrets"
+        if (path[i] == 's' && path[i+1] == 'e' && path[i+2] == 'c' &&
+            path[i+3] == 'r' && path[i+4] == 'e' && path[i+5] == 't')
+            return 1;
+        // ".env"
+        if (path[i] == '.' && path[i+1] == 'e' && path[i+2] == 'n' &&
+            path[i+3] == 'v')
+            return 1;
+    }
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_openat")
+int guard_openat_enter(struct trace_event_raw_sys_enter *ctx) {
+    // Only track for untrusted processes
+    if (is_trusted_pid())
+        return 0;
+
+    char *pathname = (char *)ctx->args[1];
+    if (!pathname)
+        return 0;
+
+    char path[SECRETS_PATH_LEN] = {};
+    if (bpf_probe_read_user_str(path, sizeof(path), pathname) < 0)
+        return 0;
+
+    if (is_secrets_path(path)) {
+        __u32 tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+        __u8 val = 1;
+        bpf_map_update_elem(&pending_opens, &tid, &val, BPF_ANY);
+    }
+
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_openat")
+int guard_openat_exit(struct trace_event_raw_sys_exit *ctx) {
+    __u32 tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+
+    __u8 *pending = bpf_map_lookup_elem(&pending_opens, &tid);
+    if (!pending)
+        return 0;
+
+    bpf_map_delete_elem(&pending_opens, &tid);
+
+    // ret is the new fd (or negative error)
+    long fd = ctx->ret;
+    if (fd < 0)
+        return 0;
+
+    // Add to watched_fds
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u64 fd_key = ((__u64)pid << 32) | (__u64)fd;
+    __u8 val = 1;
+    bpf_map_update_elem(&watched_fds, &fd_key, &val, BPF_ANY);
+
+    return 0;
+}
+
 char LICENSE[] SEC("license") = "GPL";

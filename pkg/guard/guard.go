@@ -164,6 +164,28 @@ func Attach(cfg Config) (*Guard, error) {
 		g.readExit = l
 	}
 
+	// Attach auto-watch hooks for secrets file opens
+	openEnterProg := coll.Programs["guard_openat_enter"]
+	if openEnterProg != nil {
+		l, err := link.Tracepoint("syscalls", "sys_enter_openat", openEnterProg, nil)
+		if err != nil {
+			// Non-fatal: auto-watch is optional, WatchFd still works
+			fmt.Fprintf(os.Stderr, "warn: attaching openat_enter: %v\n", err)
+		} else {
+			// Store link to prevent GC (leak is fine for long-running loader)
+			_ = l
+		}
+	}
+	openExitProg := coll.Programs["guard_openat_exit"]
+	if openExitProg != nil {
+		l, err := link.Tracepoint("syscalls", "sys_exit_openat", openExitProg, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: attaching openat_exit: %v\n", err)
+		} else {
+			_ = l
+		}
+	}
+
 	// Set up perf reader for events
 	eventsMap := coll.Maps["guard_events"]
 	if eventsMap != nil {
