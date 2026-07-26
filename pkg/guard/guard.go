@@ -44,6 +44,13 @@ type Config struct {
 
 	// BPF object file path
 	BPFObjectPath string
+
+	// TrustedPIDs: pre-populate trusted process list (optional)
+	// In production, overlay_exec.c populates this dynamically
+	TrustedPIDs []uint32
+
+	// UntrustedPIDs: pre-populate untrusted process list (optional)
+	UntrustedPIDs []uint32
 }
 
 // Attach loads the secret_guard BPF and configures it with the given secrets.
@@ -108,6 +115,27 @@ func Attach(cfg Config) (*Guard, error) {
 		return nil, fmt.Errorf("setting secret count: %w", err)
 	}
 
+	// Populate trusted/untrusted PID maps
+	trustedMap := coll.Maps["trusted_pids"]
+	untrustedMap := coll.Maps["untrusted_pids"]
+
+	if trustedMap != nil {
+		for _, pid := range cfg.TrustedPIDs {
+			val := uint8(1)
+			if err := trustedMap.Put(pid, val); err != nil {
+				return nil, fmt.Errorf("adding trusted pid %d: %w", pid, err)
+			}
+		}
+	}
+	if untrustedMap != nil {
+		for _, pid := range cfg.UntrustedPIDs {
+			val := uint8(1)
+			if err := untrustedMap.Put(pid, val); err != nil {
+				return nil, fmt.Errorf("adding untrusted pid %d: %w", pid, err)
+			}
+		}
+	}
+
 	// Attach tracepoints
 	writeProg := coll.Programs["guard_write_enter"]
 	if writeProg != nil {
@@ -155,6 +183,26 @@ func (g *Guard) WatchFd(pid uint32, fd uint32) error {
 	key := (uint64(pid) << 32) | uint64(fd)
 	val := uint8(1)
 	return g.watchedFds.Put(key, val)
+}
+
+// MarkUntrusted adds a PID to the untrusted set (writable layer).
+func (g *Guard) MarkUntrusted(pid uint32) error {
+	untrustedMap := g.coll.Maps["untrusted_pids"]
+	if untrustedMap == nil {
+		return fmt.Errorf("untrusted_pids map not found")
+	}
+	val := uint8(1)
+	return untrustedMap.Put(pid, val)
+}
+
+// MarkTrusted adds a PID to the trusted set (read-only layer).
+func (g *Guard) MarkTrusted(pid uint32) error {
+	trustedMap := g.coll.Maps["trusted_pids"]
+	if trustedMap == nil {
+		return fmt.Errorf("trusted_pids map not found")
+	}
+	val := uint8(1)
+	return trustedMap.Put(pid, val)
 }
 
 // UnwatchFd removes a watched fd.

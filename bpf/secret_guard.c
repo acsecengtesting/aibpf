@@ -1,32 +1,53 @@
 // SPDX-License-Identifier: GPL-2.0
 // Secret guard: prevents secret exfiltration via write() syscalls
-// and masks secret values when read from /proc/*/environ or files.
+// and masks secret values when read from .env / secrets files.
+//
+// Trust model (overlay-aware):
+//   - Processes from read-only layer (trusted_pids) → can read secrets freely
+//   - Processes from writable layer (untrusted_pids) → writes are scrubbed,
+//     reads are masked
+//   - If overlay_exec is not loaded, ALL processes are treated as untrusted
+//     (fail-safe)
 //
 // Strategy: Use a prefix-match approach. Store first PREFIX_LEN bytes
 // of each secret in a hash map. For each write/read buffer, slide a
-// PREFIX_LEN window and do a map lookup. This avoids nested loops
-// that blow up the BPF verifier.
+// PREFIX_LEN window and do a map lookup.
 
 #include "common.h"
 
-#define PREFIX_LEN 8          // first 8 bytes of secret as lookup key
+#define PREFIX_LEN 8
 #define SCAN_BUF_LEN 256
 #define MAX_SECRETS 16
 #define MAX_SECRET_LEN 64
-#define MASK_STR "***MASKED"  // 9 chars, fits in PREFIX_LEN+1
-#define MASK_LEN 9
 
-// --- Maps ---
+// --- Shared maps (pinned, shared with overlay_exec.c) ---
 
-// Prefix lookup: key = first 8 bytes of a secret value -> secret index
+// Untrusted PIDs: processes running from writable layer
+// Populated by overlay_exec.c, read by this program
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u32);
+    __type(value, __u8);
+} untrusted_pids SEC(".maps");
+
+// Trusted PIDs: processes running from read-only layer
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u32);
+    __type(value, __u8);
+} trusted_pids SEC(".maps");
+
+// --- Secret storage ---
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_SECRETS);
     __type(key, char[PREFIX_LEN]);
-    __type(value, __u32);  // index into secrets array
+    __type(value, __u32);
 } secret_prefixes SEC(".maps");
 
-// Full secret values for verification after prefix match
 struct secret_entry {
     char value[MAX_SECRET_LEN];
     __u32 len;
@@ -57,7 +78,7 @@ struct {
 // Events
 struct guard_event {
     __u32 pid;
-    __u32 action;  // 0 = write blocked, 1 = read masked
+    __u32 action;  // 0 = write blocked, 1 = read masked, 2 = trusted (audit)
     __u32 secret_idx;
     __u32 fd;
 };
@@ -78,11 +99,11 @@ struct read_ctx {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
-    __type(key, __u32);  // tid
+    __type(key, __u32);
     __type(value, struct read_ctx);
 } active_reads SEC(".maps");
 
-// Watched fds for read masking
+// Watched fds for read masking (auto-populated on openat of secrets files)
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
@@ -91,25 +112,31 @@ struct {
 } watched_fds SEC(".maps");
 
 // ============================================================
+// Helper: check if current process is trusted (from RO layer)
+// Returns 1 if trusted, 0 if untrusted or unknown
+// ============================================================
+static __always_inline int is_trusted_pid(void) {
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u8 *trusted = bpf_map_lookup_elem(&trusted_pids, &pid);
+    if (trusted)
+        return 1;
+    return 0;
+}
+
+// ============================================================
 // Helper: scan buffer for secret prefixes using map lookup
-// Returns secret index if found, -1 otherwise.
-// Sets *match_offset to the position of the match.
 // ============================================================
 static __always_inline int scan_for_secret(char *buf, __u32 buf_len, __u32 *match_offset) {
-    // Slide PREFIX_LEN window across buffer
-    // Bound the loop to a fixed constant for the verifier
     #pragma unroll
-    for (__u32 j = 0; j < 248; j++) {  // SCAN_BUF_LEN - PREFIX_LEN
+    for (__u32 j = 0; j < 248; j++) {
         if (j + PREFIX_LEN > buf_len) return -1;
 
-        // Extract prefix at position j
         char prefix[PREFIX_LEN];
         #pragma unroll
         for (int k = 0; k < PREFIX_LEN; k++) {
             prefix[k] = buf[j + k];
         }
 
-        // Map lookup — O(1), verifier-friendly
         __u32 *idx = bpf_map_lookup_elem(&secret_prefixes, prefix);
         if (idx) {
             *match_offset = j;
@@ -120,11 +147,15 @@ static __always_inline int scan_for_secret(char *buf, __u32 buf_len, __u32 *matc
 }
 
 // ============================================================
-// WRITE SCRUBBING
+// WRITE SCRUBBING — only for untrusted processes
 // ============================================================
 
 SEC("tracepoint/syscalls/sys_enter_write")
 int guard_write_enter(struct trace_event_raw_sys_enter *ctx) {
+    // Trusted processes can write secrets freely (e.g. git sending auth)
+    if (is_trusted_pid())
+        return 0;
+
     __u32 zero = 0;
     __u32 *cnt = bpf_map_lookup_elem(&secret_count, &zero);
     if (!cnt || *cnt == 0) return 0;
@@ -133,7 +164,6 @@ int guard_write_enter(struct trace_event_raw_sys_enter *ctx) {
     __u64 user_len = ctx->args[2];
     int fd = (int)ctx->args[0];
 
-    // Get scratch buffer
     char *buf = bpf_map_lookup_elem(&scan_buf, &zero);
     if (!buf) return 0;
 
@@ -158,11 +188,15 @@ int guard_write_enter(struct trace_event_raw_sys_enter *ctx) {
 }
 
 // ============================================================
-// READ MASKING
+// READ MASKING — only for untrusted processes
 // ============================================================
 
 SEC("tracepoint/syscalls/sys_enter_read")
 int guard_read_enter(struct trace_event_raw_sys_enter *ctx) {
+    // Trusted processes read secrets unmasked
+    if (is_trusted_pid())
+        return 0;
+
     __u32 tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u32 fd = (__u32)ctx->args[0];
@@ -204,8 +238,7 @@ int guard_read_exit(struct trace_event_raw_sys_exit *ctx) {
     __u32 offset = 0;
     int idx = scan_for_secret(buf, (__u32)to_read, &offset);
     if (idx >= 0) {
-        // Overwrite the full MAX_SECRET_LEN bytes starting at match position.
-        // This ensures the entire secret is masked regardless of its length.
+        // Overwrite the full MAX_SECRET_LEN bytes to mask entire secret
         char mask[MAX_SECRET_LEN] = "********************************"
                                     "********************************";
         bpf_probe_write_user((void *)(buf_ptr + offset), mask, MAX_SECRET_LEN);
