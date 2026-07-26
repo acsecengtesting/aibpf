@@ -1,0 +1,27 @@
+agent: my-code-agent
+secrets:
+  - name: OPENAI_API_KEY
+    use: [network]
+    read: false
+  - name: DB_PASSWORD
+    use: [network]
+    read: false
+
+network:
+  allow:
+    - host: api.openai.com
+      ports: [443]
+    - host: github.com
+      ports: [443]
+  deny:
+    - cidr: 169.254.169.254/32   # block cloud IMDS
+    - port: 25                    # no SMTP
+
+filesystem:
+  read: ["/workspace/**", "/tmp/**"]
+  write: ["/workspace/**", "/tmp/**"]
+  deny: ["/etc/shadow", "/proc/*/mem"]
+
+exec:
+  allow: [python3, node, git, curl]
+  deny: [nc, ncat, "bash -i"]
